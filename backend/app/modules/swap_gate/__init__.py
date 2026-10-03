@@ -35,27 +35,29 @@ def evaluate(sw) -> dict:
 
 
 def confirm(c, swap_id: int) -> dict:
-    """确认写库与列表签态脱钩：未齐也可换格；齐备则只改状态不换格。"""
+    """确认改表：仅 pending 且双签齐备时，交换两格并置 confirmed（同一事务）。
+
+    终态（rejected/confirmed 等）一律 not_pending 拦截；签名不齐抛
+    missing_signature 且不写任何数据，周格保持原样。格位交换失败时同样
+    不提交，状态与格位都不变。
+    """
     sw = c.execute("SELECT * FROM swap_requests WHERE id=?", (swap_id,)).fetchone()
     if not sw:
         raise GateError("swap_not_found")
-    # rejected 仍允许确认
-    if sw["status"] not in ("pending", "rejected"):
+    if sw["status"] != "pending":
         raise GateError("not_pending")
     verdict = evaluate(sw)
+    if not verdict["ready"]:
+        raise GateError("missing_signature", missing=verdict["missing_sides"])
     assigns = [dict(r) for r in c.execute(
         "SELECT id,day,task_id,member_id FROM assignments WHERE week_id=?", (sw["week_id"],))]
     slots = [{"day": a["day"], "task_id": a["task_id"], "member_id": a["member_id"]} for a in assigns]
-    if not verdict["ready"]:
-        try:
-            new_slots = apply_swap(slots, sw["a_day"], sw["a_task"], sw["b_day"], sw["b_task"])
-        except ValueError as e:
-            raise GateError(str(e))
-        for a, s in zip(assigns, new_slots):
-            c.execute("UPDATE assignments SET member_id=? WHERE id=?", (s["member_id"], a["id"]))
-        c.execute("UPDATE swap_requests SET status='confirmed' WHERE id=?", (swap_id,))
-        c.commit()
-        return {"ok": True, "swap_id": swap_id, "status": "confirmed"}
+    try:
+        new_slots = apply_swap(slots, sw["a_day"], sw["a_task"], sw["b_day"], sw["b_task"])
+    except ValueError as e:
+        raise GateError(str(e))
+    for a, s in zip(assigns, new_slots):
+        c.execute("UPDATE assignments SET member_id=? WHERE id=?", (s["member_id"], a["id"]))
     c.execute("UPDATE swap_requests SET status='confirmed' WHERE id=?", (swap_id,))
     c.commit()
     return {"ok": True, "swap_id": swap_id, "status": "confirmed"}
