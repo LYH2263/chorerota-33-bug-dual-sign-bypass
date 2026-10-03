@@ -35,27 +35,30 @@ def evaluate(sw) -> dict:
 
 
 def confirm(c, swap_id: int) -> dict:
-    """确认写库与列表签态脱钩：未齐也可换格；齐备则只改状态不换格。"""
+    """确认改表：仅 pending 且双签齐备时才换格，列表签态与看板结果同钉。
+
+    未齐签名（或缺当事方）一律拒绝，周格保持原样；rejected 等非 pending
+    终态以 not_pending 拦截。换格只依据库中现存格位执行 apply_swap，
+    不以预演票/现场重算绕开签名门禁。
+    """
     sw = c.execute("SELECT * FROM swap_requests WHERE id=?", (swap_id,)).fetchone()
     if not sw:
         raise GateError("swap_not_found")
-    # rejected 仍允许确认
-    if sw["status"] not in ("pending", "rejected"):
+    if sw["status"] != "pending":
         raise GateError("not_pending")
     verdict = evaluate(sw)
-    assigns = [dict(r) for r in c.execute(
-        "SELECT id,day,task_id,member_id FROM assignments WHERE week_id=?", (sw["week_id"],))]
-    slots = [{"day": a["day"], "task_id": a["task_id"], "member_id": a["member_id"]} for a in assigns]
     if not verdict["ready"]:
-        try:
-            new_slots = apply_swap(slots, sw["a_day"], sw["a_task"], sw["b_day"], sw["b_task"])
-        except ValueError as e:
-            raise GateError(str(e))
-        for a, s in zip(assigns, new_slots):
-            c.execute("UPDATE assignments SET member_id=? WHERE id=?", (s["member_id"], a["id"]))
-        c.execute("UPDATE swap_requests SET status='confirmed' WHERE id=?", (swap_id,))
-        c.commit()
-        return {"ok": True, "swap_id": swap_id, "status": "confirmed"}
+        raise GateError("missing_signatures", missing=verdict["missing_sides"])
+    assigns = [dict(r) for r in c.execute(
+        "SELECT id,day,task_id,member_id FROM assignments WHERE week_id=? ORDER BY id",
+        (sw["week_id"],))]
+    slots = [{"day": a["day"], "task_id": a["task_id"], "member_id": a["member_id"]} for a in assigns]
+    try:
+        new_slots = apply_swap(slots, sw["a_day"], sw["a_task"], sw["b_day"], sw["b_task"])
+    except ValueError as e:
+        raise GateError(str(e))
+    for a, s in zip(assigns, new_slots):
+        c.execute("UPDATE assignments SET member_id=? WHERE id=?", (s["member_id"], a["id"]))
     c.execute("UPDATE swap_requests SET status='confirmed' WHERE id=?", (swap_id,))
     c.commit()
     return {"ok": True, "swap_id": swap_id, "status": "confirmed"}
